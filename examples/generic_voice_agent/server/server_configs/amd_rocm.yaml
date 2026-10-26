@@ -1,0 +1,55 @@
+# AMD / ROCm profile for diarization-focused testing.
+# Derived from default.yaml; changes:
+#   - STT and diarization stay on the PyTorch ROCm device namespace ("cuda"/"cuda:N").
+#     ROCm builds of PyTorch expose AMD GPUs through the same torch.cuda API).
+#   - LLM is disabled for this profile: the default Nemotron NVFP4 LLM requires
+#     vLLM + megatron-core (NVIDIA-only) and far more VRAM than AMD targets.
+#   - TTS is disabled for this profile (same NVIDIA-only dependency chain).
+#   - AMD_DEVICE_TARGET selects the physical GPU: "dgpu" = discrete RX 6600 XT
+#     (gfx1032), "apu" = Ryzen AI Max+ integrated GPU (gfx1151). Leave unset to
+#     use the config device strings as-is.
+
+server:
+  log_file: "bot_server_amd.log"
+  log_level: "DEBUG"
+  use_model_registry: true
+  talk_first: true
+
+transport:
+  audio_out_10ms_chunks: 8  # use 4 as websocket default, but increasing to a larger number might have less glitches in TTS output
+  record_audio_data: false
+  audio_log_dir: "./audio_logs"
+
+vad:
+  type: silero
+  confidence: 0.6  # VAD threshold for detecting speech versus non-speech
+  start_secs: 0.1  # min amount of speech to trigger UserStartSpeaking
+  stop_secs: 1.2  # min amount of silence to trigger UserStopSpeaking
+  min_volume: 0.4  # Microphone volumn threshold for VAD
+
+stt:
+  type: nemo
+  model: "nvidia/parakeet_realtime_eou_120m-v1"
+  # model: "nvidia/nemotron-speech-streaming-en-0.6b"
+  model_config: "./server_configs/stt_configs/nemo_cache_aware_streaming.yaml"
+  device: "cuda"
+
+diar:
+  type: nemo
+  enabled: true # set to false to disable
+  model: "nvidia/diar_streaming_sortformer_4spk-v2.1"
+  device: "cuda"
+  threshold: 0.4  # matches the verified baseline (scripts/sweep_diarization.py, code default); 0.5 is the stock NVIDIA value
+  # buffer_size: 30  # audio frames (16ms each) per diarization inference; default is the trained 0.48s chunk (30)
+  frame_len_in_secs: 0.08  # default for Sortformer, do not change unless using other architechtures
+
+turn_taking:
+  backchannel_phrases_path: "./backchannel_phrases.yaml"  # set it to the actual path of the file, or specify a list of backchannel phrases here
+  max_buffer_size: 2  # num of words more than this amount will interrupt the LLM immediately if not backchannel phrases
+  bot_stop_delay: 0.5  # a delay in seconds allowed between server and client audio output, so that the BotStopSpeaking signal is handled not too far away from the actual time that the user hears all audio output
+
+llm:
+  enabled: false  # Disabled for AMD diarization-only profile; needs vLLM + NVIDIA (NVFP4)
+
+tts:
+  enabled: false  # Disabled for AMD diarization-only profile; TTS stack is NVIDIA-only

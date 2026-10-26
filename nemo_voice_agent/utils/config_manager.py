@@ -188,6 +188,7 @@ class ConfigManager:
             self.diar_params = NeMoDiarInputParams(
                 frame_len_in_secs=self.server_config.diar.frame_len_in_secs,
                 threshold=self.server_config.diar.threshold,
+                buffer_size=self.server_config.diar.get("buffer_size", None),
             )
 
     def _resolve_backchannel_phrases(self, backchannel_phrases):
@@ -248,6 +249,16 @@ class ConfigManager:
 
     def _configure_llm(self):
         """Configure LLM parameters."""
+        llm_config = self.server_config.get("llm")
+        self.USE_LLM = llm_config is not None and llm_config.get("enabled", True)
+        if not self.USE_LLM:
+            # Keep the context-building defaults available so LLM-less profiles
+            # (e.g. the AMD diarization-only server config) still start cleanly.
+            self.SYSTEM_ROLE = "system"
+            self.SYSTEM_PROMPT_SUFFIX = ""
+            logger.info("LLM disabled by config; skipping LLM configuration.")
+            return
+
         llm_model_id = self.server_config.llm.model
         is_registry_model = False
         yaml_file_name = None
@@ -315,6 +326,19 @@ class ConfigManager:
 
     def _configure_tts(self):
         """Configure TTS parameters."""
+        tts_config = self.server_config.get("tts")
+        self.USE_TTS = tts_config is not None and tts_config.get("enabled", True)
+        if not self.USE_TTS:
+            # The TTS builder and text-aggregator builder both short-circuit on
+            # USE_TTS; these attributes are only read on the enabled path.
+            self.TTS_MAIN_MODEL_ID = None
+            self.TTS_SUB_MODEL_ID = None
+            self.TTS_DEVICE = None
+            self.TTS_THINK_TOKENS = None
+            self.TTS_EXTRA_SEPARATOR = None
+            logger.info("TTS disabled by config; skipping TTS configuration.")
+            return
+
         tts_model_id = self.server_config.tts.model
         yaml_file_name = None
         # Try to get TTS config file name from server config first

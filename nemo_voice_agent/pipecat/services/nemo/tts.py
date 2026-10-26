@@ -42,6 +42,7 @@ from pipecat.services.settings import TTSSettings
 from pipecat.services.tts_service import TTSService
 
 from nemo_voice_agent.pipecat.services.nemo.audio_logger import AudioLogger
+from nemo_voice_agent.pipecat.services.nemo.device import empty_device_cache
 from nemo_voice_agent.pipecat.services.nvidia.tts import ResilientNvidiaTTSService
 from nemo_voice_agent.pipecat.utils.text.simple_text_aggregator import (
     SimpleSegmentedTextAggregator,
@@ -621,7 +622,7 @@ class KokoroTTSService(BaseNemoTTSService):
             self._attach_g2p_fallback(pipeline)
             if cache_models:
                 model_maps[lang] = pipeline
-        torch.cuda.empty_cache()
+        empty_device_cache()
         return model_maps
 
     def _generate_audio(self, text: str) -> Iterator[np.ndarray]:
@@ -875,7 +876,7 @@ class MagpieTTSService(BaseNemoTTSService):
                 apply_TN=self._apply_TN,
                 speaker_index=self.SPEAKER_MAP[self._current_speaker],
             )
-        torch.cuda.empty_cache()
+        empty_device_cache()
         return model
 
     def _generate_audio(self, text: str) -> Iterator[np.ndarray]:

@@ -27,12 +27,14 @@ client-ready) is passed via keyword arguments.
 """
 
 import asyncio
+import os
 from contextlib import asynccontextmanager
 from typing import Any, Awaitable, Callable, Dict, List, Optional
 
 import uvicorn
 from fastapi import FastAPI, WebSocket
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
 from loguru import logger
 from pipecat.frames.frames import Frame
 from pipecat.pipeline.runner import PipelineRunner
@@ -159,12 +161,32 @@ async def run_bot_websocket_server(
         logger.info("Pipeline runner stopped")
 
 
-def create_fastapi_app(websocket_port: int, public_host: str = "127.0.0.1", ws_scheme: str = "ws") -> FastAPI:
+def create_fastapi_app(
+    websocket_port: int,
+    public_host: str = "127.0.0.1",
+    ws_scheme: str = "ws",
+    static_dir: Optional[str] = None,
+    public_ws_port: Optional[int] = None,
+) -> FastAPI:
     """FastAPI app with CORS + ``/connect`` + a stub ``/ws`` endpoint.
 
     ``/connect`` returns the ws URL the pipecat client should dial. ``/ws`` is
     kept as a placeholder mirroring the original bot scripts' unimplemented
     FastAPI websocket path.
+
+    ``public_ws_port`` overrides the port advertised in that URL. It exists for
+    container setups where the host publishes the WebSocket on a different port
+    than the one the server binds inside the container (for example
+    ``8766 -> 8765``). Without it, ``/connect`` hands the client a port that
+    only resolves inside the container, and the client cannot connect from the
+    host or the LAN. When unset, the bound ``websocket_port`` is advertised.
+
+    When ``static_dir`` names an existing directory, it is mounted at ``/`` so a
+    single origin serves both the built web client and the discovery endpoint.
+    The mount must be registered *after* ``/ws`` and ``/connect``: Starlette
+    matches routes in registration order, and a ``Mount("/")`` is a catch-all
+    that would otherwise shadow every later route. ``html=True`` makes ``/``
+    serve ``index.html`` and resolves relative asset requests.
     """
 
     @asynccontextmanager
@@ -191,9 +213,14 @@ def create_fastapi_app(websocket_port: int, public_host: str = "127.0.0.1", ws_s
 
     @app.post("/connect")
     async def bot_connect() -> Dict[Any, Any]:
-        ws_url = build_websocket_url(public_host, websocket_port, ws_scheme)
+        ws_url = build_websocket_url(public_host, public_ws_port or websocket_port, ws_scheme)
         logger.info(f"Returning WebSocket URL: {ws_url}")
         return {"ws_url": ws_url}
+
+    # Registered last: a "/" mount is a catch-all in Starlette's ordered route
+    # list, so it must follow /ws and /connect to avoid shadowing them.
+    if static_dir is not None and os.path.isdir(static_dir):
+        app.mount("/", StaticFiles(directory=static_dir, html=True), name="static")
 
     return app
 

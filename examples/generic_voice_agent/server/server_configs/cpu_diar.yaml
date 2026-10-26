@@ -1,0 +1,52 @@
+# CPU profile for the diarization-only bot on hosts without a usable GPU.
+# Derived from amd_rocm.yaml; changes:
+#   - stt.device and diar.device are "cpu": the host venv's torch is a CUDA
+#     build that cannot see the AMD GPU, and resolve_device() correctly refuses
+#     "cuda" when torch.cuda reports no devices.
+#   - LLM and TTS stay disabled for the same reasons as amd_rocm.yaml.
+# Intended for the FIRST live-bot run of the endpoint verifier; the GPU run
+# inside voice-agent-rocm-724 keeps using amd_rocm.yaml with cuda devices.
+
+server:
+  log_file: "bot_server_cpu.log"
+  log_level: "DEBUG"
+  use_model_registry: true
+  talk_first: true
+
+transport:
+  audio_out_10ms_chunks: 8
+  record_audio_data: false
+  audio_log_dir: "./audio_logs"
+
+vad:
+  type: silero
+  confidence: 0.6
+  start_secs: 0.1
+  stop_secs: 1.2
+  min_volume: 0.4
+
+stt:
+  type: nemo
+  model: "nvidia/parakeet_realtime_eou_120m-v1"
+  model_config: "./server_configs/stt_configs/nemo_cache_aware_streaming.yaml"
+  device: "cpu"
+
+diar:
+  type: nemo
+  enabled: true
+  model: "nvidia/diar_streaming_sortformer_4spk-v2.1"
+  device: "cpu"
+  threshold: 0.4  # matches the verified baseline in scripts/sweep_diarization.py
+  # buffer_size: 30  # audio frames (16ms each) per diarization inference; default is the trained 0.48s chunk (30)
+  frame_len_in_secs: 0.08
+
+turn_taking:
+  backchannel_phrases_path: "./backchannel_phrases.yaml"
+  max_buffer_size: 2
+  bot_stop_delay: 0.5
+
+llm:
+  enabled: false
+
+tts:
+  enabled: false

@@ -39,6 +39,20 @@
       opacity: 0.6;
     }
   </style>
+  <script>
+    // Set the theme before first paint to avoid a light flash. Defaults to dark;
+    // an explicit choice made with the in-page toggle is remembered.
+    (function () {
+      try {
+        document.documentElement.setAttribute(
+          'data-theme',
+          localStorage.getItem('theme') || 'dark'
+        );
+      } catch (e) {
+        document.documentElement.setAttribute('data-theme', 'dark');
+      }
+    })();
+  </script>
 </head>
 
 <body>
@@ -50,8 +64,8 @@
     <div class="server-selection">
       <label for="server-select">Server:</label>
       <select id="server-select">
-        <option value="websocket">WebSocket Server</option>
-        <option value="fastapi">FastAPI Server</option>
+        <option value="same-origin">Same-origin (/connect)</option>
+        <option value="custom">Custom server</option>
       </select>
     </div>
     <div class="controls">
@@ -60,7 +74,23 @@
       <button id="mute-btn" disabled>Mute</button>
       <button id="reset-btn" disabled>Reset</button>
     </div>
+    <button id="theme-toggle" type="button" title="Toggle light/dark theme">Light</button>
   </div>
+
+  <div id="media-notice" class="notice notice-warning" hidden></div>
+
+  <div class="status-line" id="status-line">Inference: —  ·  Speaker: —</div>
+
+  <section class="diarization">
+    <div class="diar-header">
+      <h3 class="diar-title">Diarized Transcript</h3>
+      <span class="diar-now" id="diar-now">Now speaking: —</span>
+    </div>
+    <div class="diar-roster" id="diar-roster">
+      <span class="diar-empty">No speakers yet</span>
+    </div>
+    <div class="diar-transcript" id="diar-transcript"></div>
+  </section>
 
   <div class="volume-indicator">
     <div class="volume-label">Microphone Volume:</div>

@@ -16,6 +16,7 @@
 """Mocked lifecycle coverage for the NeMo diarization service."""
 
 import asyncio
+import threading
 from types import SimpleNamespace
 
 import pytest
@@ -161,3 +162,83 @@ def test_process_frame_tracks_vad_and_disabled_passthrough(monkeypatch):
     service._enabled = False
     asyncio.run(service.process_frame(start, FrameDirection.DOWNSTREAM))
     assert service.frames[-1] == (start, FrameDirection.DOWNSTREAM)
+
+
+def test_buffer_size_defaults_to_trained_chunk_and_respects_override(monkeypatch):
+    monkeypatch.setattr(diar_module.STTService, "__init__", lambda self, **kwargs: None)
+
+    class Model:
+        def __init__(self, config, model, **kwargs):
+            pass
+
+    monkeypatch.setattr(diar_module, "NeMoStreamingDiarService", Model)
+
+    defaults = _params()
+    defaults.frame_len_in_secs = 0.08
+    defaults.raw_audio_frame_len_in_secs = 0.016
+    defaults.buffer_size = None
+    NemoDiarService(model="diar.nemo", params=defaults, enabled=True, device="cpu")
+    # Trained chunk: 6 * 80ms = 0.48s = 30 raw 16ms frames.
+    assert defaults.buffer_size == 30
+
+    overridden = _params()
+    overridden.frame_len_in_secs = 0.08
+    overridden.raw_audio_frame_len_in_secs = 0.016
+    overridden.buffer_size = 12
+    NemoDiarService(model="diar.nemo", params=overridden, enabled=True, device="cpu")
+    assert overridden.buffer_size == 12
+
+
+def test_flush_holds_vad_stop_until_queue_drained(monkeypatch):
+    """The VAD stop frame is forwarded only after queued audio is diarized and pushed."""
+    service = _bare()
+    service._params = _params()  # buffer_size=1: every run_stt chunk goes straight to the queue
+
+    events = []
+
+    async def base(self, frame, direction):
+        events.append(("forwarded", type(frame).__name__))
+
+    monkeypatch.setattr(diar_module.STTService, "process_frame", base)
+
+    release = threading.Event()
+
+    class Model:
+        def diarize(self, audio):
+            release.wait(5)
+            return "pred"
+
+    service._model = Model()
+
+    async def scenario():
+        loop = asyncio.get_running_loop()
+        service.get_event_loop = lambda: loop
+        service.create_task = lambda coro: loop.create_task(coro)
+        service._processing_running = True
+        processor = loop.create_task(service._processing_task_handler())
+        responder = loop.create_task(service._response_task_handler())
+
+        async def handle(result):
+            events.append(("result", result))
+
+        service._handle_diarization_result = handle
+
+        await service._queue.put(b"audio")
+        stop = VADUserStoppedSpeakingFrame()
+        held = loop.create_task(service.process_frame(stop, FrameDirection.UPSTREAM))
+        await asyncio.sleep(0.1)
+        # Diarization is still blocked inside the model; the stop frame must be held.
+        assert events == []
+
+        release.set()
+        await asyncio.wait_for(held, 5)
+        # The diarization result was pushed, and only then the stop frame forwarded.
+        assert events == [("result", "pred"), ("forwarded", "VADUserStoppedSpeakingFrame")]
+
+        await service._queue.put(None)
+        await asyncio.sleep(0.1)
+        processor.cancel()
+        responder.cancel()
+        await asyncio.gather(processor, responder, return_exceptions=True)
+
+    asyncio.run(scenario())

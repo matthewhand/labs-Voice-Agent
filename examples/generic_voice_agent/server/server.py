@@ -67,6 +67,18 @@ FASTAPI_PORT = int(os.getenv("FASTAPI_PORT", 7860))
 SERVER_CONFIG_PATH = os.getenv("SERVER_CONFIG_PATH", None)
 SERVER_PUBLIC_HOST = os.getenv("SERVER_PUBLIC_HOST", "127.0.0.1")
 WEBSOCKET_SCHEME = os.getenv("WEBSOCKET_SCHEME", "ws")
+# Port advertised by ``/connect`` when it differs from the bound WebSocket port.
+# Containers that publish the WebSocket on a different host port (e.g. 8766 ->
+# 8765) must set this, or clients are handed a port that only resolves inside
+# the container.
+SERVER_PUBLIC_WS_PORT = os.getenv("SERVER_PUBLIC_WS_PORT")
+PUBLIC_WS_PORT = int(SERVER_PUBLIC_WS_PORT) if SERVER_PUBLIC_WS_PORT else None
+# Built web client (``npm run build``), served from the same origin as /connect
+# when present. Missing dist is fine: create_fastapi_app skips the mount.
+CLIENT_DIST_DIR = os.getenv(
+    "CLIENT_DIST_DIR",
+    os.path.normpath(os.path.join(os.path.dirname(__file__), "..", "client", "dist")),
+)
 
 
 async def run_bot_websocket(host: str, port: int):
@@ -128,15 +140,21 @@ async def run_bot_websocket(host: str, port: int):
         pipeline_list.append(turn_taking)
     if user_audio_buffer is not None:
         pipeline_list.append(user_audio_buffer)
-    pipeline_list.extend([user_agg, llm])
+    pipeline_list.append(user_agg)
+    if llm is not None:
+        pipeline_list.append(llm)
     if llm_text_processor is not None:
         pipeline_list.append(llm_text_processor)
-    pipeline_list.extend([tts, ws_transport.output(), assistant_agg])
+    if tts is not None:
+        pipeline_list.append(tts)
+    pipeline_list.extend([ws_transport.output(), assistant_agg])
     pipeline = Pipeline(pipeline_list)
 
-    resettable = [stt, tts, turn_taking, diar, user_audio_buffer]
+    # Drop the LLM/TTS slots the AMD profile disables; a bare ``None`` in the
+    # pipeline list or reset list raises at runtime.
+    resettable = [service for service in (stt, tts, turn_taking, diar, user_audio_buffer) if service is not None]
 
-    if server_config.llm.get("enable_tool_calling", False):
+    if llm is not None and server_config.llm.get("enable_tool_calling", False):
         logger.info("Tool calling enabled; registering initial tools...")
         register_direct_tools_to_llm(llm=llm, context=context, tool_mixins=[tts], tools=[tool_get_city_weather])
     else:
@@ -171,13 +189,19 @@ async def run_bot_websocket(host: str, port: int):
         rtvi=rtvi,
         task_ref=task_ref,
         audio_logger=audio_logger,
-        talk_first=True,
-        initial_frame_factory=LLMRunFrame,
+        talk_first=llm is not None,
+        initial_frame_factory=LLMRunFrame if llm is not None else None,
         on_disconnect_reset_services=None,
     )
 
 
-app = create_fastapi_app(WEBSOCKET_PORT, SERVER_PUBLIC_HOST, WEBSOCKET_SCHEME)
+app = create_fastapi_app(
+    WEBSOCKET_PORT,
+    SERVER_PUBLIC_HOST,
+    WEBSOCKET_SCHEME,
+    static_dir=CLIENT_DIST_DIR,
+    public_ws_port=PUBLIC_WS_PORT,
+)
 
 
 async def main():

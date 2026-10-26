@@ -53,9 +53,12 @@ class NeMoDiarInputParams(BaseModel):
     frame_len_in_secs: Optional[float] = 0.08  # 80ms for FastConformer model
     config_path: Optional[str] = None  # path to the Niva ASR config file
     raw_audio_frame_len_in_secs: Optional[float] = 0.016  # 16ms for websocket transport
-    # number of audio frames to buffer; 1 frame is 16ms,
-    # streaming Sortformer was trained with 6*0.08=0.48s chunks
-    buffer_size: Optional[int] = 30
+    # number of audio frames to buffer per diarization inference; 1 frame is 16ms.
+    # streaming Sortformer was trained with 6*0.08=0.48s chunks, so the effective
+    # default (see NemoDiarService.__init__) is 30 frames = 0.48s. Smaller values
+    # run the model more often per second of audio; the value is overridable via
+    # the ``diar.buffer_size`` server-config key.
+    buffer_size: Optional[int] = None
 
 
 class NemoDiarService(STTService):
@@ -93,7 +96,13 @@ class NemoDiarService(STTService):
         self._device = device
         self._sample_rate = sample_rate
         self._audio_passthrough = audio_passthrough
-        params.buffer_size = params.frame_len_in_secs // params.raw_audio_frame_len_in_secs
+        if params.buffer_size is None:
+            # Default to the trained chunk (6 * 80ms = 0.48s = 30 raw frames).
+            # A caller/config can override ``buffer_size`` explicitly; the old
+            # behavior of forcing one inference per 80ms (frame_len // raw_frame
+            # = 5) starved the single background diarization thread and left the
+            # result queue seconds behind the live transcript.
+            params.buffer_size = int(round(params.frame_len_in_secs / params.raw_audio_frame_len_in_secs)) * 6
         self._params = params
         self._model_name = model
         self._use_vad = use_vad
@@ -196,6 +205,15 @@ class NemoDiarService(STTService):
                         logger.debug("Received stop signal in background processor")
                         break
 
+                    if isinstance(audio, tuple) and audio[0] == "flush":
+                        # Flush marker: everything queued before it has been
+                        # processed; acknowledge from the response side so the
+                        # caller also knows every result was *pushed*.
+                        asyncio.run_coroutine_threadsafe(
+                            self._response_queue.put(audio), self.get_event_loop()
+                        )
+                        continue
+
                     # Process diarization
                     diar_result = self._model.diarize(audio)
                     # Send result back to async loop
@@ -254,6 +272,10 @@ class NemoDiarService(STTService):
                     await self.stop_ttfb_metrics()
                     await self.stop_processing_metrics()
                     self._has_generated_metrics = True  # prevent future metrics generation
+
+                    if isinstance(result, tuple) and result[0] == "flush":
+                        result[1].set()
+                        continue
 
                     if isinstance(result, tuple) and result[0] == "error":
                         # Handle error from background processing
@@ -343,6 +365,31 @@ class NemoDiarService(STTService):
             await self.push_frame(frame, direction)
             return
 
+        if isinstance(frame, VADUserStoppedSpeakingFrame) and self._enabled:
+            # Hold the VAD stop frame until every queued audio chunk has been
+            # diarized and its result pushed. Downstream (turn taking) finalizes
+            # the utterance when this frame arrives and tags the transcript with
+            # the *current* speaker, so the final diarization update for this
+            # utterance must land before the frame is forwarded. Skipping the
+            # base-class handler here only defers TTFB bookkeeping for this
+            # service, which reports no per-utterance metrics anyway. The
+            # The background consumer may not be running (service not started,
+            # or unit tests exercising process_frame directly). Queueing the
+            # residual in that state would leave stale audio to be diarized
+            # into the *next* session, so the trailing partial buffer is only
+            # flushed when a consumer is live.
+            if getattr(self, "_processing_running", False):
+                # Queue the trailing partial buffer first. run_stt only enqueues
+                # full buffer_size blocks, so without this the residual (up to
+                # one trained chunk, 0.48s) at the end of every utterance was
+                # dropped — including entire sub-chunk utterances, which got no
+                # diarization at all. Audio must be queued *before* the flush
+                # marker so it is provably covered by the drain.
+                if self._vad_user_speaking and self._audio_buffer:
+                    await self._queue.put(b"".join(self._audio_buffer))
+                    self._audio_buffer = []
+                await self._flush_pending_audio()
+
         await super().process_frame(frame, direction)
         if isinstance(frame, VADUserStartedSpeakingFrame):
             self._vad_user_speaking = True
@@ -354,12 +401,31 @@ class NemoDiarService(STTService):
             self._current_speaker_id = None
             self._audio_buffer = []
 
+    async def _flush_pending_audio(self):
+        """Wait until all audio queued so far has been diarized and its result pushed.
+
+        A ``("flush", event)`` marker is threaded through the same queues the background
+        processor and response handler already consume, so ordering with respect
+        to previously queued audio is guaranteed: the marker is only observed
+        after every chunk queued before it was processed, and only returned to
+        the caller after every result queued before it was pushed.
+        """
+        flush_event = asyncio.Event()
+        marker = ("flush", flush_event)
+        await self._queue.put(marker)
+        await flush_event.wait()
+        logger.debug("Diarization queue flushed before VAD stop frame was forwarded")
+
     def reset(self):
         """Reset the diarization service."""
         self._current_speaker_id = None
         self._audio_buffer = []
         self._vad_user_speaking = False
-        self._model.reset_state()
+        if self._model is not None:
+            # _model is None when the service was constructed disabled; the RTVI
+            # reset action calls reset() on every non-None resettable service,
+            # so this must not raise in that state.
+            self._model.reset_state()
         logger.debug("Diarization service reset complete")
 
     def _get_dominant_speaker_id(self, spk_pred: np.ndarray):
