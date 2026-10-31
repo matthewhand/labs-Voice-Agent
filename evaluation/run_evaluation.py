@@ -30,6 +30,7 @@ Usage:
 import argparse
 import asyncio
 import json
+import math
 import os
 import sys
 from datetime import datetime
@@ -38,6 +39,7 @@ from nemo_voice_agent.evaluation.runner import run_dynamic_evaluation
 from nemo_voice_agent.evaluation.scenarios import get_eval_scenario, list_eval_scenarios
 from nemo_voice_agent.evaluation.utils import LLMJudge, validate_judge_numeric_options
 from nemo_voice_agent.utils import FileLogger
+from nemo_voice_agent.utils.misc import REDACTED, redact_literals
 
 
 # Args that materially affect scoring or scenario selection — diff these on resume
@@ -55,11 +57,15 @@ _CONSISTENCY_CHECK_FIELDS = (
     "judge_top_p",
     "judge_seed",
     "strict_match",
+    "conversation_end_policy",
+    "inactivity_timeout",
 )
 
 
 def _validate_args(parser: argparse.ArgumentParser, args: argparse.Namespace) -> None:
     """Validate numeric scoring options after argparse has parsed their types."""
+    if not math.isfinite(args.inactivity_timeout) or args.inactivity_timeout <= 0:
+        parser.error(f"--inactivity-timeout must be greater than 0, got {args.inactivity_timeout}")
     try:
         validate_judge_numeric_options(
             judge_threshold=args.judge_threshold,
@@ -78,14 +84,15 @@ def _validate_args(parser: argparse.ArgumentParser, args: argparse.Namespace) ->
 def _build_invocation_record(args: argparse.Namespace, scenarios: list) -> dict:
     """Snapshot the CLI invocation for ``run_args.json``.
 
-    Redacts ``judge_api_key`` so it never lands on disk.
+    Redacts ``judge_api_key`` in both ``parsed_args`` and ``argv`` so it never lands on disk. ``argv`` is
+    redacted by value, which covers ``--judge-api-key KEY``, ``--judge-api-key=KEY``, and abbreviated flags.
     """
     parsed = {k: v for k, v in vars(args).items()}
     if parsed.get("judge_api_key"):
-        parsed["judge_api_key"] = "<redacted>"
+        parsed["judge_api_key"] = REDACTED
     return {
         "started_at": datetime.now().isoformat(timespec="seconds"),
-        "argv": list(sys.argv),
+        "argv": [redact_literals(arg, [args.judge_api_key]) for arg in sys.argv],
         "parsed_args": parsed,
         "resolved_scenario_count": len(scenarios),
         "resolved_scenario_names": [s.name for s in scenarios],
@@ -345,14 +352,74 @@ Examples:
     parser.add_argument(
         "--min-agent-turns",
         type=int,
-        default=3,
+        default=2,
         metavar="N",
         help=(
             "Minimum number of completed agent turns for a scenario to be scored on its own merits. "
             "Scenarios with fewer agent turns (e.g. due to a stalled vLLM server) are counted as FAILURES "
             "in the composite success rate, skipped in the per-signal action-match/db-state/nl-assertion "
             "rates, and flagged in the summary. On --resume, they are also treated as in-flight and "
-            "re-run. Default: 3. Pass 0 to disable the filter."
+            "re-run. Default: 2 — legitimately short scenarios (refusals, quick lookups) bottom out at 3 "
+            "agent responses, so a floor of 3 sits inside that cluster. Pass 0 to disable the filter."
+        ),
+    )
+    parser.add_argument(
+        "--no-auto-resume-on-stale",
+        dest="auto_resume_on_stale",
+        action="store_false",
+        default=True,
+        help=(
+            "Disable the automatic in-run re-run of scenarios that recorded ZERO conversation turns. "
+            "Enabled by default: zero turns means the bots never exchanged audio, so there is no "
+            "measurement to bias by retrying."
+        ),
+    )
+    parser.add_argument(
+        "--auto-resume-on-insufficient-turns",
+        action="store_true",
+        default=False,
+        help=(
+            "Also auto-retry scenarios that merely fall below --min-agent-turns. OFF by default: that "
+            "floor is a heuristic and legitimately short scenarios sit on it, so because such scenarios "
+            "are forced to is_successful=False, retrying turns a guaranteed failure into a fresh draw "
+            "and biases the success rate upward."
+        ),
+    )
+    parser.add_argument(
+        "--max-auto-retries",
+        type=int,
+        default=1,
+        metavar="N",
+        help="Maximum automatic re-runs per scenario (default: 1). Bounds the loop when a backend is down.",
+    )
+    parser.add_argument(
+        "--auto-retry-backoff-secs",
+        type=float,
+        default=5.0,
+        metavar="SECS",
+        help=(
+            "Seconds to wait before an automatic re-run (default: 5.0). An immediate retry against a "
+            "hung backend is the least likely moment to succeed."
+        ),
+    )
+    parser.add_argument(
+        "--conversation-end-policy",
+        choices=("tool-only", "valid-terminal-state"),
+        default="tool-only",
+        help=(
+            "Policy for the clean-exit success gate. 'tool-only' requires the agent to call "
+            "EndConversationTool. 'valid-terminal-state' also accepts a simulator-reported end or an "
+            "inactivity timeout when the user was the final speaker. Default: tool-only."
+        ),
+    )
+    parser.add_argument(
+        "--inactivity-timeout",
+        type=float,
+        default=120.0,
+        metavar="SECONDS",
+        help=(
+            "Stop a scenario after this many seconds without conversational activity from either side. "
+            "This is independent of the overall --duration limit. Default: 120.0."
         ),
     )
 
@@ -508,6 +575,12 @@ Examples:
                 judge_include_conversation=args.judge_include_conversation,
                 strict_match=args.strict_match,
                 min_agent_turns=args.min_agent_turns,
+                auto_resume_on_stale=args.auto_resume_on_stale,
+                auto_resume_on_insufficient_turns=args.auto_resume_on_insufficient_turns,
+                max_auto_retries=args.max_auto_retries,
+                auto_retry_backoff_secs=args.auto_retry_backoff_secs,
+                conversation_end_policy=args.conversation_end_policy,
+                inactivity_timeout=args.inactivity_timeout,
             )
         )
         return 0

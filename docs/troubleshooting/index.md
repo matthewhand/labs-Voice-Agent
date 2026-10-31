@@ -38,6 +38,38 @@ model configuration takes precedence.
 **Resolution:** Install `build-essential` and `python3-dev`, or run `bash install.sh`, which installs them. For
 more information, refer to [Installation](../get-started/installation.md).
 
+## A previous utterance appears at the start of the next user message
+
+**Cause:** A transcript arrived after its user turn had already ended. The large language model (LLM) user
+aggregator keeps that late text and adds it to the start of the next user message. In an evaluation run, the
+`update_system_prompt` action clears that text at the start of each scenario. A transcript that arrives after
+that reset still starts the next scenario's first message. The following conditions can end a turn before its
+transcript arrives:
+
+- Pipecat's user-turn watchdog fired. It fires only when `turn_taking.user_turn_stop_timeout` is a positive
+  number. An offline `nemo_speechlm` transcription that takes longer than that value triggers it.
+- `SegmentedSTTUserTurnStopStrategy` gave up on a `nemo_speechlm` segment whose transcription had not returned
+  10 seconds after the latest VAD stop.
+- A custom pipeline pairs `NemoSpeechLMSTTService` with Pipecat's `SpeechTimeoutUserTurnStopStrategy`, and
+  the user paused mid-utterance.
+
+With an omni LLM, a late transcript can instead move into the next turn's audio message or text stand-in,
+regardless of the watchdog setting. For that case, refer to
+[Multimodal and Omni Models](../about/core-concepts/language-models/multimodal.md#how-the-omni-switch-changes-the-pipeline).
+
+**Resolution:** Remove `turn_taking.user_turn_stop_timeout` or set it to `null`, which turns the watchdog off.
+That is the default. If you need a finite watchdog, set it above your slowest transcription latency. To confirm
+that the watchdog fired, search `bot_server.log` and the rotated `bot_server.<timestamp>.log` files for
+`User stopped speaking (strategy: None)`. A `WARNING` that ends in `giving up on them` instead means that the
+speech language model (SpeechLM) endpoint at `stt.base_url` had not returned a segment's transcription 10
+seconds after the latest VAD stop. That limit has no configuration key, so reduce the endpoint latency. If a
+custom pipeline pairs `NemoSpeechLMSTTService` with Pipecat's `SpeechTimeoutUserTurnStopStrategy`, use
+`SegmentedSTTUserTurnStopStrategy` instead, as described in
+[Building Your Own Pipeline](../build-voice-agents/extend/pipelines/custom-pipeline.md#stop-strategy-for-offline-speechlm-transcription).
+For more information, refer to
+[Turn taking](../about/core-concepts/speech-pipeline/turn-taking.md#user-turn-watchdog) and
+[Multi-Segment Turns](../about/core-concepts/speech-pipeline/turn-taking.md#multi-segment-turns).
+
 ## Agent quietly starts a second vLLM on port 8001
 
 **Cause:** When `start_vllm_on_init: true`, the server on the requested port is already serving a different
@@ -46,12 +78,32 @@ model ID. The launcher scans forward for a free port.
 **Resolution:** Kill the stale server with `lsof -i :8000`, or set `llm.model` to exactly the ID that the
 running server reports.
 
+## Bot ignores an utterance and the log reports an empty or failed transcription
+
+**Cause:** `NemoSpeechLMSTTService` logged `Received empty transcription from SALM server` or
+`Error in NeMo offline SALM STT processing:`, so no transcript reached the LLM user aggregator. For a
+non-omni LLM, the stop strategy waits for transcript text, and the user-turn watchdog is off by default. The
+user turn therefore stays open until the user speaks again and that speech produces a transcript. The LLM
+receives nothing for that utterance with or without the watchdog. An omni LLM still receives the audio,
+because its turns do not wait for a transcript.
+
+**Resolution:** Check that the SpeechLM endpoint at `stt.base_url` is running and that `stt.model` matches its
+`--served-model-name`. The next utterance that produces a transcript closes the open turn. To close such a
+turn on its own, set `turn_taking.user_turn_stop_timeout` above your slowest transcription latency. For more
+information, refer to [Turn taking](../about/core-concepts/speech-pipeline/turn-taking.md#user-turn-watchdog).
+
 ## Bot interrupts too eagerly or waits too long before replying
 
-**Cause:** Voice activity detection (VAD) end-of-turn timing controls when the bot responds.
+**Cause:** End-of-turn timing depends on `turn_taking.type`. Under `type: speech_timeout`, two waits are
+additive: voice activity detection (VAD) reports the end of speech after `vad.stop_secs` of silence, and only
+then does Pipecat's `SpeechTimeoutUserTurnStopStrategy` wait a further `turn_taking.user_speech_timeout`,
+which defaults to 0.6 seconds. A `vad.stop_secs` of 0.8 seconds therefore ends the turn 1.4 seconds after the
+user stops speaking. Under `type: nemo`, only `vad.stop_secs` applies, because `NeMoTurnTakingService` emits
+the user-turn frames itself.
 
-**Resolution:** Tune `vad.stop_secs`, which controls the silence required to end a turn, along with
-`vad.confidence` and `vad.min_volume`. For more information, refer to
+**Resolution:** Tune both keys under `type: speech_timeout`. Lower `turn_taking.user_speech_timeout` to cut
+the trailing wait, and raise it when the bot cuts in during mid-sentence pauses. Tune `vad.stop_secs`,
+`vad.confidence`, and `vad.min_volume` for the silence window itself. For more information, refer to
 [Turn taking](../about/core-concepts/speech-pipeline/turn-taking.md).
 
 ## Bot never greets and the log reports a connection error for http://localhost:8000/v1
@@ -86,6 +138,23 @@ page.
 The defaults in `examples/generic_voice_agent/server/server.py` are `SERVER_HOST=0.0.0.0`,
 `WEBSOCKET_PORT=8765`, `FASTAPI_PORT=7860`, `SERVER_PUBLIC_HOST=127.0.0.1`, and `WEBSOCKET_SCHEME=ws`. For more
 information, refer to [Environment variables](../reference/runtime/environment.md).
+
+If you browse from a different machine than the one running the server, refer to
+[Access the Agent From Another Machine](../get-started/quickstart.md#access-the-agent-from-another-machine).
+The `SERVER_PUBLIC_HOST` default of `127.0.0.1` resolves to the browser's own machine.
+
+## Enormous or fabricated transcripts reach the agent
+
+**Cause:** With `stt.type: nemo_speechlm`, the offline speech language model (SpeechLM) can fall into a
+repetition hallucination and decode thousands of tokens of invented prose from a few seconds of audio. The
+fabricated text enters the agent's context as a user turn, which derails the reply and inflates latency and
+token cost. A flat `stt.generation_kwargs.max_tokens` cannot separate this from a genuinely long utterance.
+
+**Resolution:** Bound the decode budget by audio duration. Set `stt.max_tokens_per_sec` to a value between 20
+and 25, which leaves a wide margin over the 3 to 4 tokens per second that real English speech needs. Each
+request then carries `min(max_tokens, audio_duration_seconds * max_tokens_per_sec)`. The key is unset by
+default, and it only lowers a `max_tokens` that you configure. For more information, refer to
+[ASR](../about/core-concepts/speech-pipeline/asr.md#limit-the-decode-budget-by-audio-duration).
 
 ## Error connecting: Cannot read properties of undefined (reading 'enumerateDevices') appears
 
@@ -233,9 +302,11 @@ session.
 
 ## Short acknowledgements such as "uh-huh" interrupt the bot
 
-**Cause:** Backchannel filtering is disabled.
+**Cause:** Backchannel filtering is disabled, or the configuration runs `turn_taking.type: speech_timeout`,
+which has no backchannel stage at all.
 
-**Resolution:** Set `turn_taking.backchannel_phrases_path` to a phrase list instead of `null`.
+**Resolution:** Set `turn_taking.type: nemo`, and set `turn_taking.backchannel_phrases_path` to a phrase list
+instead of `null`.
 
 ## Speaker labels flip between turns or remain the same for every turn
 
@@ -268,6 +339,16 @@ more information, refer to [eva_airline](../evaluate/domain-guides/eva-airline.m
 **Resolution:** Run `lsof -i :8765` and `lsof -i :7860`, and then kill the stale process or export different
 `WEBSOCKET_PORT` and `FASTAPI_PORT` values.
 
+## Startup warns that turn_taking.enabled is ignored
+
+**Cause:** The boolean `turn_taking.enabled` key was replaced by `turn_taking.type`. `ConfigManager` no longer
+reads the old key: it warns and applies the `nemo` default. A config that used `enabled: false` therefore runs
+the NeMo turn-taking service instead of the VAD-driven strategies it asked for.
+
+**Resolution:** Replace `enabled: true` with `type: nemo`, and `enabled: false` with `type: speech_timeout`.
+For more information, refer to
+[Turn taking](../about/core-concepts/speech-pipeline/turn-taking.md).
+
 ## tau2 scenario disconnects with WebSocket close code 1009
 
 **Cause:** A database (DB) payload is inlined into a frame larger than the transport message cap.
@@ -280,6 +361,37 @@ more information, refer to [eva_airline](../evaluate/domain-guides/eva-airline.m
 
 **Resolution:** Use a noise-canceling microphone or a quieter environment. For more information, refer to
 [ASR](../about/core-concepts/speech-pipeline/asr.md).
+
+## vLLM fails to build a CUDA extension because nvcc or the CUDA runtime is not found
+
+**Cause:** Something is building a CUDA C++ extension from source, and `nvcc` cannot compile or link it.
+This applies only to extension builds, such as installing `flash-attn` from a source distribution or
+building vLLM itself instead of using the prebuilt wheel. It does not apply to the `torch.compile` work
+that vLLM logs at startup, which Triton compiles with the `ptxas` binary bundled in
+`triton/backends/nvidia/bin/` and needs no CUDA compiler. Two conditions cause the failure. First, `nvcc`
+is absent, or the `nvcc` on `PATH` belongs to a different CUDA release than the `nvidia-cuda-runtime`
+wheel in the virtual environment. Second, the CUDA wheels install only versioned library names such as
+`libcudart.so.13`, while the linker resolves the unversioned `libcudart.so` that `-lcudart` names, so the
+link step fails even though the runtime is present. A system CUDA installation under `/usr/local/cuda`
+supplies both the compiler and those unversioned names, which is why machines that have one never hit
+this.
+
+**Resolution:** Source `scripts/setup_cuda_toolchain.sh` in the shell that starts vLLM. The script installs
+the `cuda-toolkit` compiler components that match the installed runtime series, creates the missing
+unversioned linker symlinks in a cache directory, installs Ninja, and exports `CUDA_HOME`, `PATH`,
+`LIBRARY_PATH`, and `LD_LIBRARY_PATH`. It then compiles and links a minimal CUDA program, so a failure
+surfaces before you load a model.
+
+```bash
+source scripts/setup_cuda_toolchain.sh
+vllm serve ...
+```
+
+Source the script rather than running it, because a subprocess cannot export variables to the shell that
+starts vLLM. Run it only after an extension build fails. An installation that uses the prebuilt wheels
+needs no CUDA compiler, and the script is not a no-op on a working machine: it ignores any system CUDA and
+prepends its own toolchain to `PATH`, `LIBRARY_PATH`, and `LD_LIBRARY_PATH`, so the compiler matches the
+runtime wheel that PyTorch was built against.
 
 ## vLLM is running but the agent still reports errors
 

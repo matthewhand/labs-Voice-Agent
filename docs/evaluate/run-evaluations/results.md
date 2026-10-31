@@ -89,7 +89,7 @@ rates, token usage, and per-domain breakdowns when the run spans multiple domain
 
 Two lines deserve special attention:
 
-- `WARNING: N scenario(s) had fewer than 3 agent turn(s) ... and were counted as failures.` — the
+- `WARNING: N scenario(s) had fewer than 2 agent turn(s) ... and were counted as failures.` — the
   `--min-agent-turns` filter fired. Those scenarios are hard failures in the composite rate and are
   skipped in the per-signal rates, so they depress the headline number while shrinking every
   per-signal denominator. Re-run them with `--resume` as described in [Resuming a Run](resume.md).
@@ -113,8 +113,12 @@ The per-scenario source of truth. Fields always present:
 | `duration_seconds`, `scenario_duration` | Bridge-measured and runner-measured wall clock |
 | `latency_stats` | `count`, `mean_ms`, `p50_ms`, `p95_ms`, `min_ms`, `max_ms` |
 | `latencies` | Per-measurement `user_transcript` / `agent_transcript` / `latency_ms` |
-| `stop_reason` | `[EXIT]` (agent ended the call) or `[TIMEOUT]` |
-| `clean_exit` | `true` only if `stop_reason` is `[EXIT]` |
+| `stop_reason` | `[EXIT]` (agent ended the call), `[SIMULATOR_EXIT]` (simulator ended it under the opt-in policy), `[INACTIVITY_TIMEOUT]` (the activity timer expired), or `[TIMEOUT]` (the overall scenario limit expired) |
+| `inactivity_timeout_seconds` | Configured inactivity interval; `120.0` seconds by default |
+| `clean_exit` | Conversation-end verdict under the selected policy |
+| `end_conversation_tool_called` | Whether the agent explicitly called `EndConversationTool` |
+| `simulator_end_reported`, `last_speaker` | Whether the simulator reported success and the role of the final recorded turn |
+| `conversation_end_policy`, `conversation_end_reason` | Policy used and diagnostic reason for its verdict |
 | `is_action_match` | Action-list signal; `"N/A"` when the scenario ships no reference answer |
 | `token_usage` | Per side: `n_calls`, `prompt`, `completion` |
 | `success_breakdown` | Signal names bucketed into `passed` / `failed` / `not_applicable` / `excluded` |

@@ -16,6 +16,7 @@
 """Unit coverage for config-driven STT, TTS, and LLM factories."""
 
 import pytest
+from loguru import logger
 from omegaconf import OmegaConf
 
 from nemo_voice_agent.pipecat.services.nemo import llm, stt, tts
@@ -159,6 +160,101 @@ class TestFunctionCallTimeoutIsBounded:
         assert LLMService()._function_call_timeout_secs is None
 
 
+class TestApiKeyIsRedactedInLogs:
+    """The key reaches the service but never the log."""
+
+    @pytest.fixture
+    def logs(self):
+        # The code logs through loguru, which never reaches pytest's caplog.
+        records = []
+        sink_id = logger.add(records.append, level="DEBUG")
+        yield records
+        logger.remove(sink_id)
+
+    @pytest.mark.unit
+    def test_llm_factory(self, monkeypatch, logs):
+        monkeypatch.setattr(llm, "VLLMService", _fake("vllm"))
+        cfg = OmegaConf.create({"type": "vllm", "model": "m", "dtype": "float16", "api_key": "fake-api-key"})
+
+        result = llm.get_llm_service_from_config(cfg)
+
+        assert "fake-api-key" not in "".join(logs)
+        assert "'api_key': '<redacted>'" in "".join(logs)
+        assert result[1]["api_key"] == "fake-api-key"
+
+    @pytest.mark.unit
+    def test_tts_factory(self, monkeypatch, logs):
+        monkeypatch.delenv("NVIDIA_API_KEY", raising=False)
+        monkeypatch.setattr(tts, "SimpleSegmentedTextAggregator", _fake("aggregator"))
+        monkeypatch.setattr(tts, "ResilientNvidiaTTSService", _fake("nvidia"))
+        cfg = OmegaConf.create({"type": "nvidia", "api_key": "fake-api-key"})
+
+        result = tts.get_tts_service_from_config(cfg)
+
+        assert "fake-api-key" not in "".join(logs)
+        assert "'api_key': '<redacted>'" in "".join(logs)
+        assert result[1]["api_key"] == "fake-api-key"
+
+    @pytest.mark.unit
+    def test_vllm_service_init(self, logs):
+        """No vLLM server is started; the OpenAI client is only constructed."""
+        service = llm.VLLMService(model="m", api_key="fake-api-key", start_vllm_on_init=False)
+
+        assert "fake-api-key" not in "".join(logs)
+        assert service._client.api_key == "fake-api-key"
+
+    @pytest.mark.unit
+    def test_llm_factory_redacts_api_key_in_vllm_server_params(self, monkeypatch, logs):
+        monkeypatch.setattr(llm, "VLLMService", _fake("vllm"))
+        params = "--api-key fake-server-key --port 8000"
+        cfg = OmegaConf.create({"type": "vllm", "model": "m", "dtype": "float16", "vllm_server_params": params})
+
+        result = llm.get_llm_service_from_config(cfg)
+
+        assert "fake-server-key" not in "".join(logs)
+        assert "--api-key <redacted>" in "".join(logs)
+        assert result[1]["vllm_server_params"] == f"--dtype float16 {params}"
+
+    @pytest.mark.unit
+    def test_vllm_server_start_redacts_api_key(self, monkeypatch, logs):
+        """The launch command and vLLM's own startup output are logged without the key."""
+        launched = {}
+
+        class _DeadProcess:
+            pid = 1234
+
+            def __init__(self, cmd, **kwargs):
+                launched["cmd"] = cmd
+
+            def terminate(self):
+                pass
+
+            def poll(self):
+                return 1
+
+            def communicate(self):
+                return "non-default args: {'api_key': ['fake-server-key']}", "boom with fake-server-key"
+
+        def _no_server(*args, **kwargs):
+            raise llm.requests.exceptions.ConnectionError()
+
+        monkeypatch.setattr(llm.requests, "get", _no_server)
+        monkeypatch.setattr(llm.psutil, "process_iter", lambda *args, **kwargs: [])
+        monkeypatch.setattr(llm.subprocess, "Popen", _DeadProcess)
+        service = object.__new__(llm.VLLMService)
+        service._device = "cpu"
+        service._vllm_server_max_wait_time = 10
+        service._vllm_server_check_interval = 1
+
+        with pytest.raises(RuntimeError) as excinfo:
+            service._start_vllm_server("m", "--dtype float16 --api-key fake-server-key", None)
+
+        assert "fake-server-key" not in "".join(logs)
+        assert "fake-server-key" not in str(excinfo.value)
+        assert "--api-key <redacted>" in "".join(logs)
+        assert launched["cmd"][-2:] == ["--api-key", "fake-server-key"]
+
+
 def test_llm_auto_detection_and_validation(monkeypatch):
     monkeypatch.setattr(llm, "HuggingFaceLLMService", _fake("hf"))
     monkeypatch.setattr(llm, "VLLMService", _fake("vllm"))
@@ -258,3 +354,72 @@ class TestServiceSettingsAreFullyInitialized:
         assert self._uninitialized(service) == []
         assert service._settings.voice == expected_voice
         assert service._settings.language == expected_language
+
+
+class TestVLLMReadinessCheckSendsApiKey:
+    """A vLLM server started with an API key answers 401 to unauthenticated /v1 requests."""
+
+    @pytest.mark.unit
+    @pytest.mark.parametrize(
+        ("params", "env_key", "client_key", "expected"),
+        [
+            ("--dtype float16 --api-key sk-flag", "sk-env", "sk-client", "sk-flag"),
+            ("--api_key=sk-flag --port 8001", "sk-env", "sk-client", "sk-flag"),
+            ("--dtype float16", "sk-env", "sk-client", "sk-env"),
+            (None, None, "sk-client", "sk-client"),
+            (None, None, None, None),
+        ],
+    )
+    def test_server_api_key_resolution(self, monkeypatch, params, env_key, client_key, expected):
+        if env_key is None:
+            monkeypatch.delenv("VLLM_API_KEY", raising=False)
+        else:
+            monkeypatch.setenv("VLLM_API_KEY", env_key)
+        assert llm.get_vllm_server_api_key(params, client_key) == expected
+
+    @pytest.mark.unit
+    def test_keyed_server_is_detected_as_ready(self, monkeypatch):
+        monkeypatch.delenv("VLLM_API_KEY", raising=False)
+        state = {"launched": False, "headers": []}
+
+        class _RunningProcess:
+            pid = 1234
+
+            def __init__(self, cmd, **kwargs):
+                state["launched"] = True
+
+            def poll(self):
+                return None
+
+            def terminate(self):
+                pass
+
+        class _Response:
+            def __init__(self, status_code):
+                self.status_code = status_code
+
+            def json(self):
+                return {"data": [{"id": "m"}]}
+
+        def _get(url, headers=None, timeout=None):
+            state["headers"].append(headers)
+            if not state["launched"]:
+                raise llm.requests.exceptions.ConnectionError()
+            if headers != {"Authorization": "Bearer sk-server"}:
+                return _Response(401)
+            return _Response(200)
+
+        monkeypatch.setattr(llm.requests, "get", _get)
+        monkeypatch.setattr(llm.psutil, "process_iter", lambda *args, **kwargs: [])
+        monkeypatch.setattr(llm.psutil, "net_connections", lambda *args, **kwargs: [])
+        monkeypatch.setattr(llm.subprocess, "Popen", _RunningProcess)
+        monkeypatch.setattr(llm.time, "sleep", lambda seconds: None)
+        service = object.__new__(llm.VLLMService)
+        service._device = "cpu"
+        service._vllm_server_max_wait_time = 3
+        service._vllm_server_check_interval = 1
+
+        base_url = service._start_vllm_server("m", "--dtype float16 --api-key sk-server", None, api_key="EMPTY")
+
+        assert base_url.startswith("http://localhost:")
+        assert state["headers"][-1] == {"Authorization": "Bearer sk-server"}

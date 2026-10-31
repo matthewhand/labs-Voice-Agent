@@ -44,7 +44,8 @@ The server resolves a configuration in the following order before any service bu
 3. **The sub-config overwrites the top-level block**, key by key. Setting a key in `default.yaml` that the
    sub-config also sets has no effect. Overrides are logged at INFO.
 4. The server logs the fully resolved configuration at startup as `Server config: ...`. Use that entry to
-   confirm which values took effect.
+   confirm which values took effect. Any non-empty `api_key` or `*_api_key` value appears as `<redacted>`,
+   and so does an `--api-key` value inside `llm.vllm_server_params`.
 
 "Required" below means the code reads the key without a fallback, so the server raises if it is missing.
 
@@ -90,8 +91,26 @@ The code reads all four voice activity detection (VAD) keys without a fallback a
 | --- | --- | --- | --- |
 | `confidence` | float | `0.6` | speech-vs-nonspeech threshold |
 | `start_secs` | float | `0.1` | minimum speech before user-start |
-| `stop_secs` | float | `1.2` | minimum silence before user-stop |
-| `min_volume` | float | `0.4` | microphone volume gate |
+| `stop_secs` | float | `1.2` | minimum silence before the VAD reports the user stopped speaking |
+| `min_volume` | float | `0.2` | microphone volume gate |
+
+`stop_secs` is not the whole end-of-turn latency, and what it leaves out depends on `turn_taking.type`:
+
+- With `turn_taking.type: nemo`, `NeMoTurnTakingService` acts on the VAD stop frame, so the user turn ends
+  `vad.stop_secs` after the last speech.
+- With `turn_taking.type: speech_timeout`, Pipecat's `SpeechTimeoutUserTurnStopStrategy` starts two timers
+  when that frame arrives and ends the turn only once both have elapsed and at least one transcript has
+  arrived. The wait after the VAD frame is therefore
+  `max(user_speech_timeout, max(0, stt.ttfs_p99_latency - vad.stop_secs))`, and the user turn ends
+  `vad.stop_secs` plus that wait after the last speech. For `default_nvidia.yaml`, which pairs
+  `stop_secs: 0.2` with `user_speech_timeout: 0.6` and an unset `ttfs_p99_latency` that Pipecat substitutes
+  with 1.0, the wait is between 0.6 and 0.8 seconds, so the turn ends 0.8 to 1.0 seconds after the last
+  speech. With `stt.type: nemo_speechlm` and a non-omni LLM, the builder uses the
+  `SegmentedSTTUserTurnStopStrategy` subclass, which also waits until every VAD segment in the turn is
+  transcribed. Refer to
+  [Turn Taking](../../about/core-concepts/speech-pipeline/turn-taking.md) for the worked cases.
+
+Tune `stop_secs` and `user_speech_timeout` together when you chase end-of-turn latency.
 
 `vad.type` appears in the shipped configs but is not read by any code — Silero is always used.
 
@@ -101,21 +120,27 @@ The `stt` block selects and configures the local or hosted speech-to-text (STT) 
 
 | Key | Type | Default | Consumed by |
 | --- | --- | --- | --- |
-| `type` | `nemo` \| `nvidia` | required | `get_stt_service_from_config` (asserted) |
-| `model` | string | required | both backends |
+| `type` | `nemo` \| `nemo_speechlm` \| `nvidia` | required | `get_stt_service_from_config` (asserted); `build_context_and_aggregators` — `nemo_speechlm` selects `SegmentedSTTUserTurnStopStrategy` under `turn_taking.type: speech_timeout` with a non-omni LLM |
+| `model` | string | required | all three backends |
 | `model_config` | path | none | `ConfigManager` — basename selects the file under `stt_configs/` |
 | `device` | string | required for `nemo` | `NemoSTTService` |
-| `sample_rate` | int | `16000` | both backends |
+| `sample_rate` | int | `16000` | all three backends |
 | `att_context_size` | list | `[70, 1]` | `NeMoSTTInputParams` — left/right streaming context |
 | `frame_len_in_secs` | float | `0.08` | `NeMoSTTInputParams` |
 | `audio_chunk_size_in_secs` | float | `0.08` | derives `buffer_size` when it is unset |
 | `buffer_size` | int | `audio_chunk_size_in_secs // transport.audio_in_frame_len_secs` | `NeMoSTTInputParams` |
 | `ignore_eou_eob` | bool | `false` | `NemoSTTService` — ignore end-of-utterance/barge-in tokens |
 | `ttfs_p99_latency` | float or null | `null` | `NemoSTTService` |
+| `base_url` | string | `"http://localhost:8000/v1"` | `nemo_speechlm` backend — OpenAI-compatible SpeechLM endpoint |
+| `generation_kwargs` | dict | `{"chat_template_kwargs": {"enable_thinking": false}}` | `nemo_speechlm` backend — merged over the default and forwarded as `extra_body` |
+| `max_tokens_per_sec` | float or null | `null` | `NemoSpeechLMSTTService` — caps `max_tokens` at `audio_duration_seconds * max_tokens_per_sec`, floored at 16 tokens. Unset keeps the flat budget. With no configured `max_tokens`, the derived value is sent on its own |
+| `system_prompt` | string | `"You are a helpful assistant. /no_think"` | `nemo_speechlm` backend — path-or-literal, resolved by `resolve_prompt` |
+| `user_prompt` | string | `NemoSpeechLMSTTService.DEFAULT_USER_PROMPT` | `nemo_speechlm` backend — the verbatim-transcript instruction sent after the audio; path-or-literal, resolved by `resolve_prompt` |
+| `api_key_env_var` | string | none | `nemo_speechlm` backend — environment variable holding the API key when `api_key` is unset |
 | `server` | string | `"grpc.nvcf.nvidia.com:443"` | `nvidia` backend only |
 | `function_id` | string | value in `default_nvidia.yaml` | `nvidia` backend — paired with `model`; change both together |
 | `language` | string | `"en-US"` | `nvidia` backend |
-| `api_key` | string | `"None"`, overridden by `NVIDIA_API_KEY` | `nvidia` backend |
+| `api_key` | string | `"None"`, overridden by `NVIDIA_API_KEY` | `nvidia` backend; also read by `nemo_speechlm`, which falls back to `api_key_env_var` |
 
 For more detail, refer to [ASR](../../about/core-concepts/speech-pipeline/asr.md).
 
@@ -136,17 +161,37 @@ The `diar` block enables speaker diarization and sets its model and detection pa
 
 ## turn_taking
 
-The `turn_taking` block controls backchannel handling and interruption timing.
+The `turn_taking` block selects the turn-detection strategy, then tunes the one you select.
 
 | Key | Type | Default | Consumed by |
 | --- | --- | --- | --- |
-| `enabled` | bool | `true` | `ConfigManager`, `build_turn_taking` — returns `None` when false |
-| `backchannel_phrases_path` | path, list, or null | required when enabled | `NeMoTurnTakingService`; a relative path is tried against the CWD then the server base dir, and a missing file raises |
-| `max_buffer_size` | int | required when enabled (shipped: `2`) | word count above which a non-backchannel utterance interrupts immediately |
-| `bot_stop_delay` | float | required when enabled (shipped: `0.5`) | seconds of server and client audio slack before bot-stop is honored |
+| `type` | `nemo` \| `speech_timeout` | `nemo` | `ConfigManager` (asserted), `build_turn_taking` — returns `None` for `speech_timeout` |
+| `backchannel_phrases_path` | path, list, or null | required for `nemo` | `NeMoTurnTakingService`; a relative path is tried against the CWD then the server base dir, and a missing file raises |
+| `max_buffer_size` | int | required for `nemo` (shipped: `2`) | word count above which a non-backchannel utterance interrupts immediately |
+| `bot_stop_delay` | float | required for `nemo` (shipped: `0.5`) | seconds of server and client audio slack before bot-stop is honored |
+| `user_speech_timeout` | float | `0.6` | `build_context_and_aggregators` — silence `SpeechTimeoutUserTurnStopStrategy` waits on top of `vad.stop_secs`; applies to `speech_timeout` only |
+| `user_turn_stop_timeout` | float or null | `null` (watchdog off) | `build_context_and_aggregators` — `LLMUserAggregatorParams.user_turn_stop_timeout`; `null` or `0` disables Pipecat's watchdog; applies to both types |
 
-Disabling turn-taking also changes turn detection ownership: `build_context_and_aggregators` falls back to
-VAD-driven strategies in the user aggregator. For more detail, refer to
+`type` also decides which component owns turn detection, because exactly one of them may emit the user-turn
+frames:
+
+- `nemo` — `build_turn_taking` returns a `NeMoTurnTakingService` that emits the frames, and
+  `build_context_and_aggregators` gives the user aggregator `ExternalUserTurnStrategies` so it stays quiet.
+- `speech_timeout` — the pipeline has no turn-taking stage, and the user aggregator derives the turn from VAD
+  with `VADUserTurnStartStrategy` and `SpeechTimeoutUserTurnStopStrategy`. With `stt.type: nemo_speechlm` and a
+  non-omni LLM, the stop strategy is the `SegmentedSTTUserTurnStopStrategy` subclass. It holds the turn until
+  every VAD segment is transcribed, and it gives up on a transcription that has not returned 10 seconds after
+  the latest VAD stop. No key in this block configures it. Refer to
+  [Multi-Segment Turns](../../about/core-concepts/speech-pipeline/turn-taking.md#multi-segment-turns).
+
+`user_turn_stop_timeout` applies under either type. Pipecat defaults its user-turn watchdog to 5.0 seconds.
+`ConfigManager` instead resolves an absent key, `null`, or `0` to `None`, so the watchdog is off. A user turn
+then ends only when its stop strategy fires. For the trade-off, refer to
+[Turn Taking](../../about/core-concepts/speech-pipeline/turn-taking.md#user-turn-watchdog).
+
+The boolean `enabled` key that this block used before is gone. `ConfigManager` ignores it and logs a warning
+naming the mapping when a config still sets it, so a stale config silently falls back to the `nemo` default.
+Replace `enabled: true` with `type: nemo`, and `enabled: false` with `type: speech_timeout`. For more detail, refer to
 [Turn Taking](../../about/core-concepts/speech-pipeline/turn-taking.md).
 
 ## llm
@@ -205,12 +250,12 @@ Omni and multimodal keys, read by `server.py` to insert a `UserAudioBuffer` and 
 
 | Key | Type | Default |
 | --- | --- | --- |
-| `is_omni_model` | bool | `false` — the switch that inserts the buffer |
+| `is_omni_model` | bool | `false` — the switch that inserts the buffer; `build_context_and_aggregators` also reads it to end user turns without waiting for a transcript |
 | `pre_cache_duration_secs` | float | `0.3` |
 | `use_stt_transcript` | bool | `false` |
 | `keep_only_last_audio_turn` | bool | `false` |
 | `text_prompt_for_audio` | string | none |
-| `text_prompt_for_transcript` | string | none — used only when `use_stt_transcript` is true |
+| `text_prompt_for_transcript` | string | none — used in the audio message when `use_stt_transcript` is true, and always in the `keep_only_last_audio_turn` stand-in |
 
 ## tts
 

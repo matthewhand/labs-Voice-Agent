@@ -50,19 +50,46 @@ scenario that completes a bridge run.
 | `scenario_duration` | float | Runner-measured wall clock around `bridge.run_scenario`. Slightly larger than `duration_seconds`. |
 | `latency_stats` | object | Aggregate over this scenario's `latencies`, with fields defined after this table. |
 | `latencies` | list | One entry per measurement: `user_transcript`, `agent_transcript`, `latency_ms`. |
-| `stop_reason` | string | `"[EXIT]"` when the agent called `EndConversationTool`, `"[TIMEOUT]"` otherwise. |
-| `clean_exit` | bool | `true` when and only when `stop_reason` is `"[EXIT]"`. Backs the `clean_exit` success signal. |
+| `stop_reason` | string | Lower-level bridge stop reason, such as `"[EXIT]"`, `"[SIMULATOR_EXIT]"`, `"[INACTIVITY_TIMEOUT]"`, or `"[TIMEOUT]"`. |
+| `inactivity_timeout_seconds` | float | Configured inactivity interval for the bridge. The default is `120.0` seconds. |
+| `clean_exit` | bool | Compatibility success signal evaluated under `conversation_end_policy`. Under the default `tool-only` policy, only an agent `EndConversationTool` exit passes. |
+| `end_conversation_tool_called` | bool | Whether the agent called `EndConversationTool`, independent of the selected policy verdict. |
+| `simulator_end_reported` | bool | Whether the simulated user emitted an `<exit>...</exit>` real-time voice interface (RTVI) server message. |
+| `last_speaker` | string or `null` | Role of the final recorded turn: `"user"`, `"agent"`, or `null` when no turn has a role. |
+| `conversation_end_policy` | string | Policy used to evaluate `clean_exit`: `"tool-only"` or `"valid-terminal-state"`. |
+| `conversation_end_reason` | string | Diagnostic reason that explains why the selected conversation-end policy passed or failed. Values are defined after this table. |
 | `is_action_match` | bool or `"N/A"` | Deterministic reference-vs-prediction action-list comparison. `false` when the prediction file is missing; `"N/A"` when the reference file is missing. |
 | `token_usage` | object | `agent` and `user` sub-objects, each with `n_calls`, `prompt`, `completion`. Accumulated from RTVI `metrics` events during the run. |
 | `success_breakdown` | object | Signal names bucketed into `passed` / `failed` / `not_applicable` / `excluded`. |
 | `is_successful` | bool or `"N/A"` | Composite verdict: strict AND over the applicable signals in the scenario's `success_signals` whitelist. |
 | `is_task_successful` | bool | Same conjunction with `clean_exit` removed from the failure list. Written whenever `is_successful` is a bool. |
+| `auto_retry_count` | int | Number of automatic in-run re-runs that this scenario needed. `0` when the first attempt was accepted. |
 
 The `latency_stats` object contains `count` (int), plus `mean_ms`, `p50_ms`, `p95_ms`, `min_ms`, and `max_ms`
 (floats). All values are zero when `count` is 0. One latency is recorded per user-to-agent handoff: the
 wall-clock gap from the user bot's last audio frame to the agent's first subsequent audio frame. The value
 therefore includes automatic speech recognition (ASR), LLM, and text-to-speech (TTS) time-to-first-byte, not
 only LLM latency.
+
+With `conversation_end_policy: "valid-terminal-state"`, `clean_exit` is also `true` when the simulator reports
+a successful end or `[INACTIVITY_TIMEOUT]` occurs after a final user turn. An inactivity timeout after a final
+agent turn and the overall `[TIMEOUT]` both remain `false`. The `--min-agent-turns` check remains authoritative
+and forces stalled scenarios to fail regardless of their conversation-end evidence.
+
+The inactivity timer resets on meaningful activity from either bot, including speaking lifecycle events,
+text-to-speech events, relevant server messages or actions, and audio frames detected as speech. It does not
+reset on continuously streamed silent audio. `inactivity_timeout_seconds` records the configured interval,
+while `duration_seconds` records actual elapsed runtime and `scenario_duration` includes runner overhead.
+
+The `conversation_end_reason` value identifies the evidence used for the verdict:
+
+| Value | Meaning |
+|---|---|
+| `agent_end_conversation_tool` | The agent called `EndConversationTool`; both policies pass. |
+| `simulator_reported_end` | The simulator emitted `<exit>...</exit>`; `valid-terminal-state` passes. The bridge records `stop_reason: "[SIMULATOR_EXIT]"` when this policy is enabled. |
+| `inactivity_timeout_after_user_final_turn` | The bridge recorded `[INACTIVITY_TIMEOUT]` and `last_speaker` is `"user"`; `valid-terminal-state` passes. An overall `[TIMEOUT]` does not qualify. |
+| `agent_end_conversation_tool_missing` | The `tool-only` policy failed because the agent did not call `EndConversationTool`. |
+| `no_valid_terminal_evidence` | The `valid-terminal-state` policy found no accepted terminal evidence. |
 
 ## metrics.json — Conditional
 
@@ -78,7 +105,8 @@ The harness writes the following keys only when the corresponding scenario signa
 | `nl_assertion_pass_rate` | float | The scenario carries `nl_assertions` **and** a judge ran. Passing verdicts divided by total verdicts. |
 | `judge_score` | float | A judge was configured (`--judge-url`). Raw score in the range 0 to 1. |
 | `judge_passed` | bool | A judge was configured **and** `--judge-threshold` was set. `judge_score >= judge_threshold`. |
-| `insufficient_agent_turns` | bool | `--min-agent-turns` (default 3) fired: the agent produced fewer LLM responses than the floor. Always `true` when present. |
+| `insufficient_agent_turns` | bool | `--min-agent-turns` (default 2) fired: the agent produced fewer LLM responses than the floor. Always `true` when present. |
+| `auto_retry_reasons` | list | `auto_retry_count` is at least 1. One short string per automatic re-run, in order, naming why the previous attempt was discarded. |
 | `trace_metrics` | object | A `trace_metrics.json` exists in the scenario directory or in `bot_logs_agent/`. Copied verbatim; the runner never interprets it. |
 
 Each `db_state_assertion_verdicts` entry contains `func_name` (registered predicate name) and `side`
@@ -104,12 +132,31 @@ Names inside each bucket are the `SuccessSignal` string values: `is_action_match
 
 ### Stalled Scenarios
 
-When `--min-agent-turns N` is set (default 3), the runner counts the agent's LLM calls — preferring
+When `--min-agent-turns N` is set (default 2), the runner counts the agent's LLM calls — preferring
 `token_usage.agent.n_calls`, falling back to the message count in `bot_logs_agent/llm_context.json`.
 Below the floor, the scenario is forced to `is_successful: false` and `is_task_successful: false`,
 gets `insufficient_agent_turns: true`, and is **skipped** in every per-signal bucket. It is a counted
 failure in the composite rate, not an exclusion. Token usage still rolls up, so cost accounting remains
 accurate. Refer to [Resuming a Run](../../evaluate/run-evaluations/resume.md) to retry them.
+
+### Automatic Retry Provenance
+
+`auto_retry_count` tells you whether the numbers in a `metrics.json` came from the first attempt or from a
+re-run that the runner performed automatically during the session. The field is always written, so `0`
+means the first attempt was accepted rather than that the feature was unavailable. `auto_retry_reasons`
+appears only when the count is at least 1 and carries one entry per discarded attempt, such as
+`0 conversation turns (bots never exchanged audio)`.
+
+Each discarded attempt keeps its own directory at `<scenario>.killed.autoretry<N>.<timestamp>/`, holding
+that attempt's logs plus a `__KILLED__` marker file. Read `auto_retry_count` when you need retry counts for
+analysis. Matching directory names is fragile, because the same `.killed.` naming also covers subdirectories
+that `--resume` moved aside. `check_resume.py` reads the same field: it lists retried scenarios that
+finished under `Completed after an automatic in-run retry`, and annotates retried scenarios that would be
+re-run again with `; already auto-retried <n>x in-run`.
+
+Automatic retry is controlled by `--no-auto-resume-on-stale`, `--auto-resume-on-insufficient-turns`,
+`--max-auto-retries`, and `--auto-retry-backoff-secs`, documented in
+[Eval CLI Reference](eval-cli.md).
 
 ## judge_result.json
 
@@ -154,7 +201,7 @@ variable names, and the second contains the labels in the file. A rate is omitte
 | `nl_assertion_success_rate` | `NL-Assertion pass` | **Assertions** emitted in the run, not scenarios. |
 | `judge_score_mean` | `Judge score mean` | Mean of `judge_score` over scenarios that were judged. |
 | `judge_pass_rate` | `Judge passed (>= threshold)` | Scenarios with a `judge_passed` bool. |
-| `clean_exit_rate` | `Clean exit` | Scenarios that completed a bridge run. |
+| `clean_exit_rate` | `Clean exit` | Scenarios that completed a bridge run, evaluated under each run's conversation-end policy. |
 
 The two assertion rates use assertions rather than scenarios as the denominator so that they remain
 comparable across domains where scenarios carry different assertion counts.

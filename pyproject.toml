@@ -192,7 +192,18 @@ override-dependencies = [
     # and needed for its core dictionary-based G2P) are added as direct deps
     # above. See nemo_voice_agent/pipecat/services/nemo/_espeak_gpl_shim.py.
     "misaki==0.9.4",
-    "pillow>=12.2.0"
+    "pillow>=13.0.0"
+]
+
+# SEC-003: reject vulnerable transitive versions without overriding their
+# declared compatibility constraints. Lock and test every supported platform.
+constraint-dependencies = [
+    "pillow>=13.0.0",
+    "nltk>=3.10.4",
+    "certifi>=2026.10.18",
+    "pyjwt>=2.15.0",
+    "anyio>=4.14.2",
+    "gitpython>=3.2.1",
 ]
 
 # g2p-en declares `distance` (GPL-3.0) in its metadata but never imports it (phantom

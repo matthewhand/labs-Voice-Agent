@@ -173,6 +173,16 @@ To prepare and submit a pull request, complete the following steps:
 5. Push to your fork and open a pull request against `main` that describes what changed and why.
 6. Address review feedback, and squash the history before merge.
 
+### Requesting Review
+
+Comment `/review` on your pull request to request an automated review. Use `/review mode=strict` for a
+strict review.
+
+The `claude-review.yml` workflow only posts command guidance for repository owners, members, and
+collaborators. Exact `/claude review` and `/claude strict-review` comments receive guidance to use
+`/review` and `/review mode=strict`, respectively. Bot comments do not trigger the workflow, and the
+workflow does not run Claude Code.
+
 ### Triggering CI
 
 The pipeline runs on pushes to `main`, to `deploy-release/*`, and to the bot-mirrored
@@ -185,10 +195,12 @@ automatically on each push. Otherwise, comment on the pull request with the SHA 
 
 Repeat the comment for each new commit. Get the SHA from `git log --oneline -1`.
 
-Documentation-only pull requests take a different path: `fern-docs-ci.yml` and
-`fern-docs-preview-build.yml` have a `docs/**` path filter and gate on MDX safety, `fern check`, and offline
-link checking. Refer to
-[Building the Docs](docs-site.md) before editing anything under `docs/`.
+Documentation-only pull requests take a different path. `fern-docs-ci.yml` checks MDX safety, navigation,
+Fern configuration, and offline links when a pull request changes `docs/**`. Separately,
+`fern-docs-preview.yml` runs on pushes to bot-mirrored `pull-request/<number>` branches. It builds a hosted
+preview and posts its link when `PUBLISH_FERN=true` and the pull request changes `docs/**` or
+`.github/workflows/fern-docs-ci.yml`. Refer to [Building the Docs](docs-site.md) before editing anything
+under `docs/`.
 
 ## Where Changes Usually Go
 
