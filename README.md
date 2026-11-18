@@ -12,8 +12,10 @@ No API keys required to get started. Happy hacking~!
 - Open-source, local deployment, and flexible customization.
 - Talk to most LLMs from vLLM/HuggingFace with configurable prompts.
 - Streaming speech recognition with low latency and end-of-utterance detection.
+- Offline, multilingual speech recognition with
+  [Nemotron-3.5-Transcribe](https://huggingface.co/nvidia/NVIDIA-Nemotron-3.5-Transcribe-30B-A4B) served through vLLM.
 - Low latency TTS for fast audio response generation.
-- Speaker diarization up to 4 speakers in different user turns.
+- Speaker diarization in different user turns: up to 8 speakers with Nemotron-3-Diarization (default), or 4 with Streaming Sortformer v2.1.
 - WebSocket server for easy deployment.
 - Tool calling for LLMs to use external tools and adjust its own behavior.
 - Voice-agent evaluation harness with deterministic + LLM-judged scoring, and 328 scenarios across 4
@@ -35,7 +37,8 @@ vllm serve nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-NVFP4 \
     --trust-remote-code --tensor-parallel-size 1 --enable-prefix-caching \
     --max-num-seqs 1 --gpu-memory-utilization 0.8 \
     --enable-auto-tool-choice --tool-call-parser qwen3_coder \
-    --reasoning-parser nemotron_v3
+    --reasoning-parser nemotron_v3 \
+    --reasoning-config '{"reasoning_start_str": "<think>", "reasoning_end_str": "\nI have to finalize the answer now.</think>"}'
 
 # terminal 1:
 cd examples/generic_voice_agent/server && python server.py    
@@ -94,6 +97,16 @@ See [Evaluate](https://docs.nvidia.com/nemo/labs-voice-agent/evaluate-voice-agen
 
 ## 📅 Latest Updates
 
+- **2026-11-03** — Default speaker diarization model switched to
+  [Nemotron-3-Diarization](https://huggingface.co/nvidia/Nemotron-3-Diarization), which tells up to 8 speakers
+  apart. It needs a newer NeMo than PyPI ships, so NeMo is now pinned to a NeMo Speech commit: re-run
+  `bash install.sh` (or `uv sync`) in an existing checkout.
+- **2026-11-02** — Support for
+  [NVIDIA-Nemotron-3.5-Transcribe-30B-A4B](https://huggingface.co/nvidia/NVIDIA-Nemotron-3.5-Transcribe-30B-A4B),
+  an offline speech recognition model for 40 languages, through the new `stt.type: nemo_speechlm` backend
+  (example config: `server_configs/default_salm.yaml`). Turn taking is now selected by `turn_taking.type`, and
+  a user turn waits for its offline transcript. The evaluation harness adds automatic retries and a
+  `--conversation-end-policy` option.
 - **2026-09-09** — `tau2_airline` evaluation now scores natural-language assertions on the 24 scenarios
   whose expected database is unchanged, so an agent that does nothing no longer passes them. One upstream
   reference action that the domain's own policy forbids is dropped from gold replay.
