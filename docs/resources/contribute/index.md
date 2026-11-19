@@ -64,15 +64,14 @@ with `source .venv/bin/activate`. Review these constraints:
 - **NeMo comes from a Git commit, not PyPI.** `pyproject.toml` pins `nemo-toolkit[asr,tts]` to a commit of
   the NeMo Speech repository, because no PyPI release loads `nvidia/Nemotron-3-Diarization`, the default
   diarization model, yet. To move the pin, change the commit hash in `pyproject.toml` and regenerate `uv.lock`
-  with `uv lock`. Keep the `torch==2.11.0` entry in `override-dependencies`, which stops the NeMo Speech
+  with `uv lock`. Keep the `torch==2.13.0` entry in `override-dependencies`, which stops the NeMo Speech
   dependency from resolving `torch` to a CPU-only wheel. Keep the `nltk>=3.10.0` entry too, which stops it
   from installing `nltk` from a release-candidate Git tag that lacks the 3.10.0 security fixes. Keep the direct
   `peft` dependency as well, because the NeMo text-to-speech package imports it. After you pull a change to the
   pin, run `bash install.sh` or `uv sync` again to update an existing `.venv`.
-- **The `torch` override and the `vllm` cap move together.** The `torch==2.11.0` override hides vLLM's exact
-  `torch` pin from the resolver, so `pyproject.toml` caps `vllm` below 0.27, the first release built against
-  a newer `torch`. To upgrade vLLM, raise the cap and change the override to the `torch` version that the new
-  vLLM release pins, in the same change.
+- **Update the `torch` and `vllm` pins together.** The `torch==2.13.0` override hides vLLM's exact `torch`
+  requirement from the resolver. This project pins `vllm==0.32.0` to pair it with PyTorch 2.13.0.
+  When you upgrade vLLM, set the override to the `torch` version that the new release requires.
 
 ## Code Style
 
@@ -115,6 +114,10 @@ runs on every pull request and fails without it. Copy the header from any existi
 YAML are not checked, but repository convention is to include one anyway.
 
 ## Running Tests
+
+Public forks without NVIDIA runner settings use GitHub-hosted checks for the Python lock, Ruff,
+documentation and review-receipt tests, and the example client build. Run the full test suite in the
+project environment when changing agent behavior.
 
 Suites live in `tests/unit/` and `tests/functional/`. There are no test modules directly under `tests/`.
 

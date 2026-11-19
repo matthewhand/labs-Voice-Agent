@@ -22,6 +22,7 @@ on:
 
 jobs:
   cherry-pick:
+    if: github.repository_owner == 'NVIDIA-NeMo' || vars.ENABLE_RELEASE_CHERRY_PICK == 'true'
     uses: NVIDIA-NeMo/FW-CI-templates/.github/workflows/_cherry_pick.yml@8ebb3aec4c246c944a25adc7b09107cbd6a76976 # v0.63.0
     secrets:
       PAT: ${{ secrets.PAT }}

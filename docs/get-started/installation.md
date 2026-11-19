@@ -154,11 +154,11 @@ Verify the selected build:
 uv run python -c "import torch; print(torch.__version__, torch.cuda.is_available())"
 ```
 
-`override-dependencies` under `[tool.uv]` also pins `torch==2.11.0`. The NeMo Speech Git dependency carries
-its own `torch` sources, which resolve Linux `torch` to a CPU-only wheel unless one of its CUDA extras is
-enabled. The override replaces those sources, so `torch` keeps resolving with its CUDA runtime wheels. Keep the
-override when you edit the dependency settings. Because the override also hides vLLM's exact `torch` pin,
-`pyproject.toml` caps `vllm` below 0.27 so that the resolver cannot pair a newer vLLM with `torch` 2.11.0.
+`override-dependencies` under `[tool.uv]` pins `torch==2.13.0`. The NeMo Speech Git dependency carries its own
+`torch` sources, which resolve Linux `torch` to a CPU-only wheel unless one of its CUDA extras is enabled.
+The override replaces those sources, so `torch` keeps resolving with its CUDA runtime wheels.
+`pyproject.toml` pins `vllm==0.32.0` to match the PyTorch release it was built against. Update both pins
+together.
 
 The wheels carry the CUDA runtime but no CUDA compiler, which is all the prebuilt PyTorch and vLLM builds
 need. Compilation becomes a problem only when something builds a CUDA extension from source later, such as
