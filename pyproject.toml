@@ -29,7 +29,7 @@ dependencies = [
     # NeMo speech stack (ASR + TTS models). Pinned to a NeMo Speech main commit because no PyPI release can
     # load nvidia/Nemotron-3-Diarization yet: 3.0.0 lacks its RoPE TransformerEncoder and 10 ms high-resolution
     # Sortformer outputs. Move back to a version specifier once a release that includes them ships.
-    "nemo-toolkit[asr,tts] @ git+https://github.com/NVIDIA-NeMo/Speech.git@e5d79d5a49cbec49d79440b0070aac0c32a8dbb8",
+    "nemo-toolkit[asr,tts] @ git+https://github.com/NVIDIA-NeMo/Speech.git@8bc3920bddc1222feca7f34361ee36d70cc033a6",
     # NeMo's TTS package imports nemo.collections.speechlm2, which needs peft; NeMo only lists it under the
     # speechlm2 extra, so importing our TTS services fails without it.
     "peft>=0.18.1",
@@ -41,9 +41,9 @@ dependencies = [
     "pipecat-ai[websocket,tracing]==1.6.0",
     # LLM backends
     "transformers>=5.8.0",
-    # Capped to the vLLM releases that pin torch==2.11.0: the torch override below hides vLLM's exact torch pin
-    # from the resolver, so a newer vLLM would lock against a torch it was not built for. Move both together.
-    "vllm>=0.24.0,<0.27",
+    # Match the exact PyTorch ABI used by this vLLM release. The torch override below hides vLLM's
+    # requirement from the resolver, so move both versions together.
+    "vllm==0.32.0",
     "openai",
     # TTS backends and audio processing
     "kokoro",
@@ -184,7 +184,7 @@ override-dependencies = [
     # unless one of its cu12/cu13 extras is enabled. Re-declaring torch here drops that source, so torch keeps
     # resolving from PyPI with its CUDA 13 runtime wheels. Keep it equal to the locked vLLM's torch pin (see the
     # vllm dependency above).
-    "torch==2.11.0",
+    "torch==2.13.0",
     # Same mechanism: NeMo Speech main sources nltk from its v3.10.0-rc1 git tag, which lacks the downloader and
     # data-loading security fixes of the 3.10.0 release. Re-declaring it keeps nltk on the PyPI release.
     "nltk>=3.10.0",
@@ -202,6 +202,11 @@ override-dependencies = [
     "numba==0.65.0",
     "transformers>=5.8.0",
     "setuptools>=79.0.0",
+    # NeMo's bounds predate these security fixes; retain fsspec's HTTP extra.
+    "fsspec[http]>=2026.6.0",
+    "hydra-core>=1.3.8",
+    # Required by the patched virtualenv release.
+    "packaging>=26.3",
     # Drop kokoro's `misaki[en]` extra request: it pulls in phonemizer-fork
     # (GPL-3.0) and espeakng_loader (bundles a compiled GPL-3.0 espeak-ng
     # binary), which are incompatible with this project's Apache-2.0 license.

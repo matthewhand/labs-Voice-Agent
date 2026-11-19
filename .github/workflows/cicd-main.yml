@@ -52,6 +52,7 @@ env:
 
 jobs:
   ephemeral-runner-routing:
+    if: ${{ github.repository_owner == 'NVIDIA-NeMo' || vars.NEMO_CI_EPHEMERAL_LANE != '' || vars.NON_NVIDIA_RUNNER_PREFIX != '' }}
     uses: NVIDIA-NeMo/FW-CI-templates/.github/workflows/_ephemeral_runner_routing.yml@4fe957d4ea5816af1d67fae130bbab4b434c10b3 # v1.9.2
     with:
       lane: ${{ vars.NEMO_CI_EPHEMERAL_LANE }}
@@ -91,6 +92,7 @@ jobs:
     if: |
       always()
       && !cancelled()
+      && needs.pre-flight.result == 'success'
       && !(needs.lint-check.result == 'failure'
       || needs.lint-check.result == 'cancelled')
       && !(needs.pre-flight.outputs.is_ci_workload == 'true'
@@ -107,6 +109,7 @@ jobs:
     if: |
       always()
       && !cancelled()
+      && needs.pre-flight.result == 'success'
       && !(needs.lint-check.result == 'failure'
       || needs.lint-check.result == 'cancelled')
       && (needs.cicd-wait-in-queue.result == 'success'
@@ -276,7 +279,10 @@ jobs:
       - build-image
       - unit-tests
       - functional-tests-h100
-    if: always() && !cancelled()
+    if: |
+      always() && !cancelled()
+      && (github.repository_owner == 'NVIDIA-NeMo'
+      || vars.NEMO_CI_EPHEMERAL_LANE != '' || vars.NON_NVIDIA_RUNNER_PREFIX != '')
     runs-on: ubuntu-latest
     permissions:
       actions: read
